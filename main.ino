@@ -138,14 +138,6 @@ void showHumdt(){
     lcd.print("%");
 }
 
-//Função para criar a tela inicial do sistema
-void homeScreen(){
-    lcd.clear();
-    showTemp();
-    showHumdt();
-
-}
-
 //Função para gerenciar a temperatura interna com o resultado do calculo PID
 void controlTemp(){
     pidInput = probeTemp;
@@ -154,6 +146,30 @@ void controlTemp(){
     Serial.println(pidOutput);
 }
 
+//PARA IMPLEMENTAÇÃO - DEFINIR OS PARAMETROS DE ACORDO COM O ESTAGIO DE CHOCAGEM
+void setParametersByStage(){
+// implementar os parametros e a definicão do estagio
+    switch (stage) {
+    case 1: //Pré Aquecimento
+        pidSetpoint = 27.0;
+        rotation = false;
+        break;
+    case 2: //Incubação
+        pidSetpoint = 37.7;
+        rotation = true;
+        break;
+    case 3:
+        pidSetpoint = 36.8;
+        rotation = false;
+        break;
+    default:
+        pidSetpoint = 0;
+        rotation = false;
+        break;
+    }
+}
+
+//Função para ajustar os parametros de acordo com gap para o alvo
 void setPidParameters(){
     double gap = abs(myPID.GetSetpoint() - pidInput);  // distance away from setpoint
     if (gap < 10) {
@@ -164,4 +180,68 @@ void setPidParameters(){
         // we're far from setpoint, use aggressive tuning parameters
         myPID.SetTunings(aggrKp, aggrKi, aggrKd);
     }
+}
+
+//Função para exibir o estagio na tela inicial
+void showStage(){
+    switch (stage) {
+    case 1:
+        lcd.setCursor(7, 0);
+	    lcd.print("AQUECENDO");
+        lcd.setCursor(7,1);
+        lcd.print("TEMPO");
+        break;
+    case 2:
+        lcd.setCursor(7, 0);
+	    lcd.print("INCUBANDO");
+        lcd.setCursor(7,1);
+        lcd.print("TEMPO");
+        break;
+    case 3:
+        lcd.setCursor(7, 0);
+	    lcd.print("NASCENDO");
+        lcd.setCursor(7,1);
+        lcd.print("TEMPO");
+        break;
+    default:
+        lcd.setCursor(7, 0);
+	    lcd.print("DESLIGADO");
+        break;
+    }
+}
+
+//Função para girar os ovos na incubadora
+void controlRoll(){
+    if(rotation == true){
+        unsigned long actTime = (millis() / 1000);
+        unsigned long auxTime;
+        //Serial.println(actTime);
+        if ((actTime - lastTime) > 3600){
+            auxTime = (millis() / 1000);
+            digitalWrite(ROTATOR_PIN, LOW);
+            lastTime = (millis() / 1000);
+        }
+        if(((millis() / 1000) - auxTime) > 10) {
+            digitalWrite(ROTATOROUTPIN, HIGH);
+        }
+        remainingTime = (lastTime + 3600) - actTime;
+        //Serial.println(remainingTime);
+        //Serial.println(lastTime); 
+  }
+}
+
+//Função para definir o estagio de acordo com o tempo desde o inicio
+void setStage(){
+    //IMPLEMETAR FUNCAO PARA DEFINIR ESTAGIO DE ACORDO COM O TEMPO
+}
+
+//Função para criar a tela inicial do sistema
+void homeScreen(){
+    lcd.clear();
+    showTemp();
+    showHumdt();
+    if (1 == 1){ // IMPLEMENTAR ALTERNAR ENTRE O ESTAGIO E O ROTACIONAR
+        showStage();
+    }
+
 }
