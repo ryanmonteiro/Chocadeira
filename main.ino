@@ -1,24 +1,27 @@
 //Controlador de chocadeira PID
 //Ryan Monteiro - 12/2022 - Versão 2.0
 
+//Para alterar os paramtros de chocagem basta mudar as configs em setParametersByStage().
+
 #include <DallasTemperature.h>
 #include <OneWire.h>
 #include <DHT.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <PID_v2.h>
+#include <TimeLib.h>
+#include <EEPROM.h>
 
 //Porta do pino de sinal do DS18B20
 #define ONE_WIRE_BUS 2
 //Porta do pino de sinal e tipo do DHT
-#define DHTPIN 4
+#define DHTPIN 3
 #define DHTTYPE DHT11
 
 //Definição dos pinos de saída
-#define HEATER_PIN       6
-#define ROTATOR_KEY_PIN  8
-#define ROTATOR_OUT_PIN  9
-#define COOLER_PIN      10
+#define HEATER_PIN   6
+#define ROTATOR_PIN  8
+#define COOLER_PIN  10
 
 //Definição de parametros do PID
 #define consKp 50
@@ -27,6 +30,10 @@
 #define aggrKp 50
 #define aggrKi 10
 #define aggrKd  0
+
+//Definição dos slots da memoria EEPROM
+#define eepromTime  0
+#define eepromStage 1
 
 const int LCD_addr = 0x3F;  // Endereço LCD I2C
 const int LCD_chars = 16;   // Numero de caracteres por linha
@@ -40,6 +47,8 @@ DHT dht (DHTPIN, DHTTYPE);
 LiquidCrystal_I2C lcd(LCD_addr, LCD_chars, LCD_lines);
 //Define uma instancia do PID_V2
 PID_v2 myPID(consKp, consKi, consKd, PID::Direct);
+//Define uma instancia do tipo time para controle do tempo
+time_t t, startTime, auxTime, leftTime;
 
 //Definicao dos caracteres customizaveis do LCD
 uint8_t tempSimbol[8]      = {0x04,0x0A,0x0A,0x0E,0x0E,0x1F,0x1F,0x0E};
@@ -54,14 +63,23 @@ DeviceAddress sensor1;
 //Definição das variaveis globais
 float probeTemp;
 float probeHumdt;
-double pidSetpoint = 33.0, pidInput, pidOutput;
+double pidSetpoint, pidInput, pidOutput;
+int savedTime, savedStage;
+boolean rotation = false;
+unsigned long targetInSeconds,targetDay, targetHour;
+unsigned long lastSync;
+
 
 //Prototipo das funções
 void getTemp(void);
 void getHumdt(void);
 void homeScreen(void);
 void controlTemp(void);
+void setParametersByStage(void);
 void setPidParameters(void);
+void controlRoll(void);
+void convertTimeToSec(void);
+void controlTime(void);
 
 void setup() {
     Serial.begin(115200);
@@ -93,17 +111,37 @@ void setup() {
     //Inicializa o controlador PID passando a leitura do sensor de temperatura e o alvo
     myPID.Start(pidInput, pidOutput, pidSetpoint);
 
+    //Seta as informações de saida do rotacionador
+    pinMode(ROTATOR_PIN, OUTPUT);
+    digitalWrite(ROTATOR_PIN, HIGH);
+
+    //Carrega da EEPROM os valores salvos de datas e estagio.
+    savedTime =   EEPROM.read(eepromTime);
+    savedStage =  1; //EEPROM.read(eepromStage);
+
+    //Captura e armazena o tempo ao iniciar;
+    startTime = now();
+
+    //Chama a função para setar os parametros
+    setParametersByStage();
+
+    //define o parametro lastSync para 0, reeiniciando contador de sincronização a cada boot do arduino
+    lastSync = 0;
+
 }
 
 void loop() {
     //Captura as informações dos sensores
     getTemp();
     getHumdt();
-    // Gera a tela de inicio
+    //Gera a tela de inicio
     homeScreen();
-    // Chama a função de controlar a temperatura
+    //Chama a função de controlar a temperatura
     controlTemp();
-
+    //Chama a função de girar os ovos na incubadora
+    controlRoll();
+    //Calcula o tempo restante e qual o estagio por input automaticamente
+    controlTime();
 }
 
 //Função para ler e tratar a temperatura do sensor
@@ -140,6 +178,7 @@ void showHumdt(){
 
 //Função para gerenciar a temperatura interna com o resultado do calculo PID
 void controlTemp(){
+    setPidParameters();
     pidInput = probeTemp;
     pidOutput = myPID.Run(pidInput);
     analogWrite(HEATER_PIN, pidOutput);
@@ -149,30 +188,41 @@ void controlTemp(){
 //PARA IMPLEMENTAÇÃO - DEFINIR OS PARAMETROS DE ACORDO COM O ESTAGIO DE CHOCAGEM
 void setParametersByStage(){
 // implementar os parametros e a definicão do estagio
-    switch (stage) {
+    switch (savedStage) {
     case 1: //Pré Aquecimento
         pidSetpoint = 27.0;
         rotation = false;
+        targetDay = 00;
+        targetHour = 12;
         break;
     case 2: //Incubação
         pidSetpoint = 37.7;
         rotation = true;
+        targetDay = 18;
+        targetHour = 00;
         break;
     case 3:
         pidSetpoint = 36.8;
         rotation = false;
+        targetDay = 05;
+        targetHour = 00;
         break;
     default:
         pidSetpoint = 0;
         rotation = false;
+        targetDay = 00;
+        targetHour = 00;
         break;
     }
+    
+    //Chama a função para convertert o tempo para segundos;
+    convertTimeToSec();
 }
 
 //Função para ajustar os parametros de acordo com gap para o alvo
 void setPidParameters(){
     double gap = abs(myPID.GetSetpoint() - pidInput);  // distance away from setpoint
-    if (gap < 10) {
+    if (gap < 5) {
         // we're close to setpoint, use conservative tuning parameters
         myPID.SetTunings(consKp, consKi, consKd);
     }
@@ -184,24 +234,71 @@ void setPidParameters(){
 
 //Função para exibir o estagio na tela inicial
 void showStage(){
-    switch (stage) {
+    Serial.println(leftTime);
+    unsigned long day;
+    unsigned long hour;
+    unsigned long min;
+    day = (leftTime / 86400);
+    hour = ((leftTime % 86400)/3600);
+    min = (((leftTime % 86400) % 3600)/60);
+
+    switch (savedStage) {
     case 1:
         lcd.setCursor(7, 0);
 	    lcd.print("AQUECENDO");
         lcd.setCursor(7,1);
-        lcd.print("TEMPO");
+        if (day < 10){
+            lcd.print("0");
+        }
+        lcd.print(day);
+        lcd.print(":");
+        if (hour < 10){
+            lcd.print("0");
+        }
+        lcd.print(hour);
+        lcd.print(":");
+        if (min < 10){
+            lcd.print("0");
+        }
+        lcd.print(min);    
         break;
     case 2:
         lcd.setCursor(7, 0);
 	    lcd.print("INCUBANDO");
         lcd.setCursor(7,1);
-        lcd.print("TEMPO");
+        if (day < 10){
+            lcd.print("0");
+        }
+        lcd.print(day);
+        lcd.print(":");
+        if (hour < 10){
+            lcd.print("0");
+        }
+        lcd.print(hour);
+        lcd.print(":");
+        if (min < 10){
+            lcd.print("0");
+        }
+        lcd.print(min); 
         break;
     case 3:
         lcd.setCursor(7, 0);
 	    lcd.print("NASCENDO");
         lcd.setCursor(7,1);
-        lcd.print("TEMPO");
+        if (day < 10){
+            lcd.print("0");
+        }
+        lcd.print(day);
+        lcd.print(":");
+        if (hour < 10){
+            lcd.print("0");
+        }
+        lcd.print(hour);
+        lcd.print(":");
+        if (min < 10){
+            lcd.print("0");
+        }
+        lcd.print(min); 
         break;
     default:
         lcd.setCursor(7, 0);
@@ -212,7 +309,7 @@ void showStage(){
 
 //Função para girar os ovos na incubadora
 void controlRoll(){
-    if(rotation == true){
+/*  if(rotation == true){
         unsigned long actTime = (millis() / 1000);
         unsigned long auxTime;
         //Serial.println(actTime);
@@ -227,13 +324,85 @@ void controlRoll(){
         remainingTime = (lastTime + 3600) - actTime;
         //Serial.println(remainingTime);
         //Serial.println(lastTime); 
-  }
+  }*/
 }
 
-//Função para definir o estagio de acordo com o tempo desde o inicio
-void setStage(){
-    //IMPLEMETAR FUNCAO PARA DEFINIR ESTAGIO DE ACORDO COM O TEMPO
+//Função para converter o tempo do objetivo em segundos
+void convertTimeToSec(){
+    targetInSeconds = ((targetDay * 86400) + (targetHour * 3600));
+    Serial.println(targetInSeconds);
 }
+
+//Função para controlar o tempo e mudança de estagio
+void controlTime(){    
+    t = now(); //captura os dados de data e armazena em t
+
+    //Função para diferenciar se houve sincronia antes ou não e realizar a conta de tempo decorrido
+    if (lastSync = 0)//Primeira sincronia
+    {
+        auxTime = (t - startTime);   
+    }
+    else{
+        auxTime = (t- lastSync);
+    }
+    lastSync = t;
+    savedTime = savedTime + auxTime;
+
+    if (savedTime >= targetInSeconds) // Verfica se decorreu o tempo naquele estágio e faz a troca para o proximo e salva na eeprom
+    {
+        switch (savedStage)
+        {
+        case 1:
+            savedStage = 2;
+            savedTime = 0;
+            EEPROM.write(eepromStage, savedStage);
+            EEPROM.write(eepromTime, savedTime);
+            break;
+        case 2:
+            savedStage = 3;
+            savedTime = 0;
+            EEPROM.write(eepromStage, savedStage);
+            EEPROM.write(eepromTime, savedTime);
+            break;
+        case 3:
+            savedStage = 0;
+            savedTime = 0;
+            EEPROM.write(eepromStage, savedStage);
+            EEPROM.write(eepromTime, savedTime);
+            break;
+        default:
+            break;
+        }
+        //Define os parametros de controle de acordo com o estagio
+        setParametersByStage();
+    }
+
+    if (auxTime % 60 == 0) //Incrementa o tempo consumido
+    {
+        savedTime = savedTime + 60;
+    }
+
+    if (auxTime % 600 == 0) //Grava na EEPROM a cada 10 minutos
+    {
+        Serial.println("Gravando tempo na EEPROM");
+        EEPROM.write(eepromTime, savedTime);
+    }
+
+    leftTime = (targetInSeconds - savedTime);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 //Função para criar a tela inicial do sistema
 void homeScreen(){
