@@ -20,20 +20,22 @@
 
 //Definição dos pinos de saída
 #define HEATER_PIN   6
+#define RESET_PIN 7
 #define ROTATOR_PIN  8
-#define COOLER_PIN  10
+
 
 //Definição de parametros do PID
 #define consKp 50
 #define consKi 10
 #define consKd  0
-#define aggrKp 50
-#define aggrKi 10
+#define aggrKp 70
+#define aggrKi 20
 #define aggrKd  0
 
 //Definição dos slots da memoria EEPROM
-#define eepromTime  0
-#define eepromStage 1
+#define eepromTime    10
+#define eepromStage   11
+#define eepromRotTime 12
 
 const int LCD_addr = 0x3F;  // Endereço LCD I2C
 const int LCD_chars = 16;   // Numero de caracteres por linha
@@ -48,7 +50,7 @@ LiquidCrystal_I2C lcd(LCD_addr, LCD_chars, LCD_lines);
 //Define uma instancia do PID_V2
 PID_v2 myPID(consKp, consKi, consKd, PID::Direct);
 //Define uma instancia do tipo time para controle do tempo
-time_t t, startTime, auxTime, leftTime;
+time_t t, startTime, auxTime, rotTime;
 
 //Definicao dos caracteres customizaveis do LCD
 uint8_t tempSimbol[8]      = {0x04,0x0A,0x0A,0x0E,0x0E,0x1F,0x1F,0x0E};
@@ -64,10 +66,10 @@ DeviceAddress sensor1;
 float probeTemp;
 float probeHumdt;
 double pidSetpoint, pidInput, pidOutput;
-int savedTime, savedStage;
+int savedTime, savedStage, savedRotTime;
 boolean rotation = false;
 unsigned long targetInSeconds,targetDay, targetHour;
-unsigned long lastSync;
+unsigned long lastSync, lastrotSync, leftTime, leftRotTime;
 
 
 //Prototipo das funções
@@ -113,11 +115,14 @@ void setup() {
 
     //Seta as informações de saida do rotacionador
     pinMode(ROTATOR_PIN, OUTPUT);
+    pinMode(RESET_PIN, INPUT_PULLUP);
     digitalWrite(ROTATOR_PIN, HIGH);
 
     //Carrega da EEPROM os valores salvos de datas e estagio.
-    savedTime =   EEPROM.read(eepromTime);
-    savedStage =  1; //EEPROM.read(eepromStage);
+    EEPROM.get(eepromTime, savedTime);
+    EEPROM.get(eepromStage, savedStage);
+    EEPROM.get(eepromRotTime, savedRotTime);
+    //savedStage =  2; Para simular outras funcoes
 
     //Captura e armazena o tempo ao iniciar;
     startTime = now();
@@ -125,9 +130,9 @@ void setup() {
     //Chama a função para setar os parametros
     setParametersByStage();
 
-    //define o parametro lastSync para 0, reeiniciando contador de sincronização a cada boot do arduino
+    //define os parametros de sincronização para 0, reeiniciando contador de sincronização a cada boot do arduino
     lastSync = 0;
-
+    lastrotSync = 0;
 }
 
 void loop() {
@@ -139,17 +144,28 @@ void loop() {
     //Chama a função de controlar a temperatura
     controlTemp();
     //Chama a função de girar os ovos na incubadora
-    controlRoll();
+    if (rotation == true){
+        controlRoll();   
+    }
     //Calcula o tempo restante e qual o estagio por input automaticamente
     controlTime();
+
+    if (digitalRead(RESET_PIN) == LOW)
+    {
+        savedStage = 1;
+        savedTime = 0;
+        savedRotTime = 0;
+        setParametersByStage();
+    }
+    
 }
 
 //Função para ler e tratar a temperatura do sensor
 void getTemp(){
     sensors.requestTemperatures();
     probeTemp = sensors.getTempC(sensor1);
-    Serial.print("Temperatura:");
-    Serial.println(probeTemp);
+    //Serial.print("Temperatura:");
+    //Serial.println(probeTemp);
 }
 
 //Função para exibição da temperatura no LCD
@@ -164,8 +180,8 @@ void showTemp(){
 //Função para ler e tratar a umidade do sensor
 void getHumdt(){
     probeHumdt = dht.readHumidity();
-    Serial.print("Umidade:");
-    Serial.println(probeHumdt);
+    //Serial.print("Umidade:");
+    //Serial.println(probeHumdt);
 }
 
 //Função para exibição da umidade no LCD
@@ -234,7 +250,7 @@ void setPidParameters(){
 
 //Função para exibir o estagio na tela inicial
 void showStage(){
-    Serial.println(leftTime);
+    //Serial.println(leftTime);
     unsigned long day;
     unsigned long hour;
     unsigned long min;
@@ -251,16 +267,17 @@ void showStage(){
             lcd.print("0");
         }
         lcd.print(day);
-        lcd.print(":");
+        lcd.print("D");
         if (hour < 10){
             lcd.print("0");
         }
         lcd.print(hour);
-        lcd.print(":");
+        lcd.print("H");
         if (min < 10){
             lcd.print("0");
         }
-        lcd.print(min);    
+        lcd.print(min);
+        lcd.print("M");    
         break;
     case 2:
         lcd.setCursor(7, 0);
@@ -270,16 +287,17 @@ void showStage(){
             lcd.print("0");
         }
         lcd.print(day);
-        lcd.print(":");
+        lcd.print("D");
         if (hour < 10){
             lcd.print("0");
         }
         lcd.print(hour);
-        lcd.print(":");
+        lcd.print("H");
         if (min < 10){
             lcd.print("0");
         }
-        lcd.print(min); 
+        lcd.print(min);
+        lcd.print("M"); 
         break;
     case 3:
         lcd.setCursor(7, 0);
@@ -289,16 +307,17 @@ void showStage(){
             lcd.print("0");
         }
         lcd.print(day);
-        lcd.print(":");
+        lcd.print("D");
         if (hour < 10){
             lcd.print("0");
         }
         lcd.print(hour);
-        lcd.print(":");
+        lcd.print("H");
         if (min < 10){
             lcd.print("0");
         }
-        lcd.print(min); 
+        lcd.print(min);
+        lcd.print("M"); 
         break;
     default:
         lcd.setCursor(7, 0);
@@ -307,30 +326,58 @@ void showStage(){
     }
 }
 
+void showRollTime(){
+    //Serial.println(leftRotTime);
+    unsigned long min;
+    min = (((leftRotTime % 86400) % 3600)/60);
+
+    lcd.setCursor(7, 0);
+	lcd.print("VIRANDO");
+    lcd.setCursor(7,1);
+    lcd.print("EM: ");
+    lcd.print("0");
+    lcd.print(min);
+    lcd.print("Min");
+}
+
 //Função para girar os ovos na incubadora
 void controlRoll(){
-/*  if(rotation == true){
-        unsigned long actTime = (millis() / 1000);
-        unsigned long auxTime;
-        //Serial.println(actTime);
-        if ((actTime - lastTime) > 3600){
-            auxTime = (millis() / 1000);
-            digitalWrite(ROTATOR_PIN, LOW);
-            lastTime = (millis() / 1000);
-        }
-        if(((millis() / 1000) - auxTime) > 10) {
-            digitalWrite(ROTATOROUTPIN, HIGH);
-        }
-        remainingTime = (lastTime + 3600) - actTime;
-        //Serial.println(remainingTime);
-        //Serial.println(lastTime); 
-  }*/
+    t = now(); //captura os dados de data e armazena em t
+
+    //Função para diferenciar se houve sincronia antes ou não e realizar a conta de tempo decorrido
+    if (lastrotSync == 0)//Primeira sincronia
+    {
+        auxTime = (t - startTime);   
+    }
+    else{
+        auxTime = (t- lastrotSync);
+    }
+    
+    lastrotSync = t;
+    savedRotTime = savedRotTime + auxTime;
+
+    if (savedRotTime % 600 == 0) //Grava na EEPROM a cada 10 minutos
+    {
+        Serial.println("Gravando tempo de rotação na EEPROM");
+        EEPROM.put(eepromRotTime, savedRotTime);
+    }
+
+    leftRotTime = (3600 - savedRotTime);
+
+    //Valida que esgotou o tempo de rotação e aciona o rele para rotacionar
+    if (leftRotTime <= 0)
+    {
+        digitalWrite(ROTATOR_PIN, LOW);
+        delay(1000);
+        digitalWrite(ROTATOR_PIN, HIGH);
+        savedRotTime = 0;
+    }
 }
 
 //Função para converter o tempo do objetivo em segundos
 void convertTimeToSec(){
     targetInSeconds = ((targetDay * 86400) + (targetHour * 3600));
-    Serial.println(targetInSeconds);
+    //Serial.println(targetInSeconds);
 }
 
 //Função para controlar o tempo e mudança de estagio
@@ -338,13 +385,14 @@ void controlTime(){
     t = now(); //captura os dados de data e armazena em t
 
     //Função para diferenciar se houve sincronia antes ou não e realizar a conta de tempo decorrido
-    if (lastSync = 0)//Primeira sincronia
+    if (lastSync == 0)//Primeira sincronia
     {
-        auxTime = (t - startTime);   
+        auxTime = (t - startTime);  
     }
     else{
-        auxTime = (t- lastSync);
+        auxTime = (t - lastSync);   
     }
+
     lastSync = t;
     savedTime = savedTime + auxTime;
 
@@ -355,20 +403,20 @@ void controlTime(){
         case 1:
             savedStage = 2;
             savedTime = 0;
-            EEPROM.write(eepromStage, savedStage);
-            EEPROM.write(eepromTime, savedTime);
+            EEPROM.put(eepromStage, savedStage);
+            EEPROM.put(eepromTime, savedTime);
             break;
         case 2:
             savedStage = 3;
             savedTime = 0;
-            EEPROM.write(eepromStage, savedStage);
-            EEPROM.write(eepromTime, savedTime);
+            EEPROM.put(eepromStage, savedStage);
+            EEPROM.put(eepromTime, savedTime);
             break;
         case 3:
             savedStage = 0;
             savedTime = 0;
-            EEPROM.write(eepromStage, savedStage);
-            EEPROM.write(eepromTime, savedTime);
+            EEPROM.put(eepromStage, savedStage);
+            EEPROM.put(eepromTime, savedTime);
             break;
         default:
             break;
@@ -377,40 +425,24 @@ void controlTime(){
         setParametersByStage();
     }
 
-    if (auxTime % 60 == 0) //Incrementa o tempo consumido
-    {
-        savedTime = savedTime + 60;
-    }
-
-    if (auxTime % 600 == 0) //Grava na EEPROM a cada 10 minutos
+    if ((savedTime % 600) == 0) //Grava na EEPROM a cada 10 minutos
     {
         Serial.println("Gravando tempo na EEPROM");
-        EEPROM.write(eepromTime, savedTime);
+        EEPROM.put(eepromTime, savedTime);
     }
 
     leftTime = (targetInSeconds - savedTime);
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 //Função para criar a tela inicial do sistema
 void homeScreen(){
     lcd.clear();
     showTemp();
     showHumdt();
-    if (1 == 1){ // IMPLEMENTAR ALTERNAR ENTRE O ESTAGIO E O ROTACIONAR
+    if ((rotation == true) && (leftRotTime < 120)){ // IMPLEMENTAR ALTERNAR ENTRE O ESTAGIO E O ROTACIONAR
+        showRollTime();
+    }
+    else{
         showStage();
     }
-
 }
