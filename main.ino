@@ -20,17 +20,13 @@
 
 //Definição dos pinos de saída
 #define HEATER_PIN   6
-#define RESET_PIN 7
+#define RESET_PIN    7
 #define ROTATOR_PIN  8
 
-
 //Definição de parametros do PID
-#define consKp 50
-#define consKi 10
-#define consKd  0
-#define aggrKp 70
-#define aggrKi 20
-#define aggrKd  0
+#define Kp 50
+#define Ki 10
+#define Kd  0
 
 //Definição dos slots da memoria EEPROM
 #define eepromTime    10
@@ -48,7 +44,7 @@ DHT dht (DHTPIN, DHTTYPE);
 //Define uma instancia do liquidCrystal para comunicar com o LCD
 LiquidCrystal_I2C lcd(LCD_addr, LCD_chars, LCD_lines);
 //Define uma instancia do PID_V2
-PID_v2 myPID(consKp, consKi, consKd, PID::Direct);
+PID_v2 myPID(Kp, Ki, Kd, PID::Direct);
 //Define uma instancia do tipo time para controle do tempo
 time_t t, startTime, auxTime, rotTime;
 
@@ -78,7 +74,6 @@ void getHumdt(void);
 void homeScreen(void);
 void controlTemp(void);
 void setParametersByStage(void);
-void setPidParameters(void);
 void controlRoll(void);
 void convertTimeToSec(void);
 void controlTime(void);
@@ -108,31 +103,31 @@ void setup() {
 	Serial.println(" Sensor(es)");
 	sensors.getAddress(sensor1, 5);
 
-    //Define os limites da saida PID
-    myPID.SetOutputLimits(0, 255);
-    //Inicializa o controlador PID passando a leitura do sensor de temperatura e o alvo
-    myPID.Start(pidInput, pidOutput, pidSetpoint);
+    //Carrega da EEPROM os valores salvos de datas e estagio.
+    EEPROM.get(eepromTime, savedTime);
+    EEPROM.get(eepromStage, savedStage);
+    EEPROM.get(eepromRotTime, savedRotTime);
+    //savedStage =  2; //Para simular outras funcoes
+    
+    //Chama a função para setar os parametros
+    setParametersByStage();
 
     //Seta as informações de saida do rotacionador
     pinMode(ROTATOR_PIN, OUTPUT);
     pinMode(RESET_PIN, INPUT_PULLUP);
     digitalWrite(ROTATOR_PIN, HIGH);
 
-    //Carrega da EEPROM os valores salvos de datas e estagio.
-    EEPROM.get(eepromTime, savedTime);
-    EEPROM.get(eepromStage, savedStage);
-    EEPROM.get(eepromRotTime, savedRotTime);
-    //savedStage =  2; Para simular outras funcoes
-
     //Captura e armazena o tempo ao iniciar;
     startTime = now();
-
-    //Chama a função para setar os parametros
-    setParametersByStage();
 
     //define os parametros de sincronização para 0, reeiniciando contador de sincronização a cada boot do arduino
     lastSync = 0;
     lastrotSync = 0;
+
+    //Define os limites da saida PID
+    myPID.SetOutputLimits(0, 255);
+    //Inicializa o controlador PID passando a leitura do sensor de temperatura e o alvo
+    myPID.Start(pidInput, pidOutput, pidSetpoint);
 }
 
 void loop() {
@@ -152,10 +147,12 @@ void loop() {
 
     if (digitalRead(RESET_PIN) == LOW)
     {
-        savedStage = 1;
+        savedStage = 2;
         savedTime = 0;
         savedRotTime = 0;
         setParametersByStage();
+        EEPROM.put(eepromStage, savedStage);
+        Serial.println("Estagio salvo na eeprom");
     }
     
 }
@@ -194,14 +191,13 @@ void showHumdt(){
 
 //Função para gerenciar a temperatura interna com o resultado do calculo PID
 void controlTemp(){
-    setPidParameters();
     pidInput = probeTemp;
     pidOutput = myPID.Run(pidInput);
     analogWrite(HEATER_PIN, pidOutput);
     Serial.println(pidOutput);
 }
 
-//PARA IMPLEMENTAÇÃO - DEFINIR OS PARAMETROS DE ACORDO COM O ESTAGIO DE CHOCAGEM
+// Define os parametros de acordo com o estagio de chocagem
 void setParametersByStage(){
 // implementar os parametros e a definicão do estagio
     switch (savedStage) {
@@ -233,19 +229,6 @@ void setParametersByStage(){
     
     //Chama a função para convertert o tempo para segundos;
     convertTimeToSec();
-}
-
-//Função para ajustar os parametros de acordo com gap para o alvo
-void setPidParameters(){
-    double gap = abs(myPID.GetSetpoint() - pidInput);  // distance away from setpoint
-    if (gap < 5) {
-        // we're close to setpoint, use conservative tuning parameters
-        myPID.SetTunings(consKp, consKi, consKd);
-    }
-    else {
-        // we're far from setpoint, use aggressive tuning parameters
-        myPID.SetTunings(aggrKp, aggrKi, aggrKd);
-    }
 }
 
 //Função para exibir o estagio na tela inicial
@@ -368,7 +351,7 @@ void controlRoll(){
     if (leftRotTime <= 0)
     {
         digitalWrite(ROTATOR_PIN, LOW);
-        delay(1000);
+        //delay(1000);
         digitalWrite(ROTATOR_PIN, HIGH);
         savedRotTime = 0;
     }
